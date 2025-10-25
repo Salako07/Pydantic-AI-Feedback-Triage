@@ -1,0 +1,31 @@
+{
+  "bias_words": [
+    "refund",
+    "charge",
+    "downtime",
+    "urgent",
+    "asap",
+    "immediately",
+    "cancel",
+    "broken",
+    "critical",
+    "emergency"
+  ],
+  "urgency_rules": {
+    "high_indicators": [
+      "can't access",
+      "can't log in",
+      "not working",
+      "losing money",
+      "need immediately"
+    ],
+    "low_indicators": [
+      "suggestion",
+      "would be nice",
+      "feature request",
+      "love your product"
+    ]
+  },
+  "max_retries": 2,
+  "version": "1.0"
+}
