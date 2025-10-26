@@ -50,6 +50,240 @@ This version includes comprehensive production features for AI observability, hu
 - pytest (backend tests)
 - Vitest + React Testing Library (frontend tests)
 
+## System Architecture
+
+### Overview
+
+The application follows a **microservices architecture** with three main components orchestrated via Docker Compose:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Frontend (React)                     │
+│  ┌────────────┐  ┌────────────┐  ┌─────────────────────┐    │
+│  │ Dashboard  │  │   Charts   │  │  WebSocket Client   │    │
+│  └────────────┘  └────────────┘  └─────────────────────┘    │
+│         │                │                    │             │
+│         └────────────────┴────────────────────┘             │
+│                          │                                  │
+│                     HTTP / WS                               │
+└──────────────────────────┼──────────────────────────────────┘
+                           │
+┌──────────────────────────┼──────────────────────────────────┐
+│                 Backend (FastAPI)                           │
+│  ┌────────────┐  ┌────────────┐  ┌─────────────────────┐    │
+│  │   Routes   │  │  Services  │  │  WebSocket Manager  │    │
+│  └─────┬──────┘  └─────┬──────┘  └─────────────────────┘    │
+│        │               │                                    │
+│  ┌─────┴──────┐  ┌────┴─────┐  ┌─────────────────────┐      │
+│  │  AI Agent  │  │ Metrics  │  │  Background Jobs    │      │
+│  │(PydanticAI)│  │  Engine  │  │  (APScheduler)      │      │
+│  └────────────┘  └──────────┘  └─────────────────────┘      │
+│                       │                    │                │
+│                 ┌─────┴────────────────────┴─────┐          │
+│                 │      Database Layer            │          │
+│                 └────────────────────────────────┘          │
+└──────────────────────────┼──────────────────────────────────┘
+                           │
+┌──────────────────────────┼──────────────────────────────────┐
+│                    MongoDB                                  │
+│  ┌──────────────────────────────────────────┐               │
+│  │   feedbacks collection                   │               │
+│  │   - customer data                        │               │
+│  │   - AI analysis results                  │               │
+│  │   - human overrides audit trail          │               │
+│  └──────────────────────────────────────────┘               │
+└─────────────────────────────────────────────────────────────┘
+
+External Integrations:
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│ LLM Provider │    │    Slack     │    │   GitHub     │
+│ (OpenAI/     │    │  (Webhooks)  │    │  (Actions)   │
+│  Anthropic/  │    │              │    │              │
+│  Gemini)     │    │              │    │              │
+└──────────────┘    └──────────────┘    └──────────────┘
+```
+
+### Data Flow: Feedback Creation
+
+```
+1. User submits feedback
+   │
+   ├→ Frontend → POST /api/feedback
+   │
+2. Backend API validates request (Pydantic)
+   │
+   ├→ Services.create_feedback()
+   │
+3. AI Agent analyzes message
+   │
+   ├→ PydanticAI → LLM Provider (OpenAI/Anthropic/Gemini)
+   │
+   ├→ Returns structured analysis:
+   │   - Sentiment (positive/neutral/negative)
+   │   - Urgency (low/medium/high)
+   │   - Category (billing/technical/product/etc)
+   │   - Summary & Recommended Action
+   │
+4. Store in MongoDB
+   │
+   ├→ Save feedback + analysis + agent_success flag
+   │
+5. Conditional actions
+   │
+   ├→ If high urgency → Send Slack alert
+   │
+   ├→ Broadcast via WebSocket → All connected clients
+   │
+6. Frontend receives update
+   │
+   └→ Dashboard refreshes in real-time
+```
+
+### Core Components
+
+#### 1. API Layer (`backend/app/api/`)
+- **routes_feedback.py**: CRUD operations, WebSocket endpoint
+- **routes_metrics.py**: Analytics endpoints (accuracy, urgency, sentiment)
+- **routes_overrides.py**: Human-in-the-loop correction endpoints
+
+Key endpoints:
+- `POST /api/feedback` - Create and analyze feedback
+- `GET /api/feedback` - List with filters (urgency, sentiment, category)
+- `WS /ws/feedbacks` - Real-time updates stream
+
+#### 2. AI Agent (`backend/app/ai_agent.py`)
+**PydanticAI-powered agent** with:
+- System prompt enforcing structured output
+- Retry logic (configurable via `prompt_config.json`)
+- Multi-provider support (OpenAI, Anthropic, Gemini)
+- Error handling: stores `analysis_error` on failure
+
+**Analysis logic:**
+- High urgency: Threats of cancellation, service blocks, financial loss
+- Medium urgency: Functional issues without immediate impact
+- Low urgency: Feature requests, praise, informational queries
+
+#### 3. Services Layer (`backend/app/services.py`)
+Business logic orchestration:
+- `create_feedback()`: Validates → AI analysis → DB save → Slack alert
+- `apply_override()`: Records human corrections with audit trail
+- `get_feedbacks()`: Filtering, pagination, sorting
+
+#### 4. Metrics Engine (`backend/app/metrics.py`)
+**MongoDB aggregation pipelines** for:
+- **Accuracy**: `1 - (overrides / total_processed)` overall and per-category
+- **Urgency breakdown**: Count by low/medium/high
+- **Sentiment trends**: Daily positive/neutral/negative counts
+
+#### 5. Background Jobs (`backend/app/jobs.py`)
+**APScheduler** with cron-based scheduling:
+- Default: Every Monday 9 AM UTC
+- Computes metrics, generates JSON reports
+- Sends weekly Slack summary
+- Lifecycle: starts on FastAPI startup, stops on shutdown
+
+#### 6. Real-Time Updates (`backend/app/api/routes_feedback.py`)
+**WebSocket ConnectionManager**:
+- Maintains list of active connections
+- `broadcast()`: Pushes new feedback to all clients
+- Frontend auto-reconnects on disconnect
+
+#### 7. Frontend Architecture (`frontend/src/`)
+
+**Pages:**
+- `Dashboard.tsx`: Analytics view with filters, charts, feedback table
+- `FeedbackDemo.tsx`: API testing interface
+
+**Services:**
+- `api.ts`: Axios HTTP client (REST calls)
+- `websocket.ts`: WebSocket client with reconnect logic
+
+**State Management:**
+- React hooks (`useState`, `useEffect`)
+- WebSocket updates trigger state changes
+- Charts recompute on filter changes
+
+### Design Patterns
+
+1. **Service Layer Pattern**: Business logic separated from API routes
+2. **Repository Pattern**: `db.py` abstracts MongoDB access
+3. **Adapter Pattern**: `ai_agent.py` abstracts LLM providers
+4. **Observer Pattern**: WebSocket for real-time pub/sub
+5. **Factory Pattern**: Dynamic LLM provider selection via config
+
+### Key Architectural Decisions
+
+1. **Async-First**: FastAPI + Motor for non-blocking I/O
+2. **Type Safety**: Pydantic (backend) + TypeScript (frontend)
+3. **Graceful Degradation**: AI failure doesn't block feedback creation
+4. **Audit Trail**: Immutable override records for compliance
+5. **Configuration-Driven**: LLM model, prompt tuning, schedule via env/JSON
+6. **Real-Time UX**: WebSocket eliminates polling overhead
+
+### Data Model
+
+**Feedback Document (MongoDB):**
+```json
+{
+  "_id": "ObjectId",
+  "customer_name": "string",
+  "email": "string",
+  "message": "string",
+  "created_at": "datetime",
+  "analysis": {
+    "sentiment": "positive|neutral|negative",
+    "urgency_level": "low|medium|high",
+    "category": "string",
+    "summary": "string",
+    "recommended_action": "string"
+  },
+  "analysis_error": "string|null",
+  "agent_success": "boolean",
+  "overrides": [
+    {
+      "field": "string",
+      "old_value": "any",
+      "new_value": "any",
+      "reason": "string",
+      "overridden_by": "string",
+      "overridden_at": "datetime"
+    }
+  ]
+}
+```
+
+### Deployment Architecture
+
+**Docker Compose Services:**
+- **mongodb:7.0**: Persistent storage (volume: `mongodb_data`)
+- **backend**: FastAPI app (port 8000)
+- **frontend**: React + Vite dev server (port 5173)
+
+**Network:** `feedback-network` (all services communicate internally)
+
+**Configuration:**
+- `.env`: Environment variables (LLM keys, Slack webhook, schedule)
+- `backend/app/config/prompt_config.json`: AI prompt tuning (no code changes needed)
+
+### Scaling Considerations
+
+For production at scale:
+
+1. **Background Task Queue**: Replace sync AI calls with Celery/RQ
+2. **Redis**: WebSocket message broker + caching
+3. **MongoDB Replica Set**: High availability
+4. **Load Balancer**: Distribute traffic across backend instances
+5. **Rate Limiting**: Per-user limits on feedback submission
+6. **CDN**: Serve frontend static assets
+
+### Security
+
+- **API Key Management**: Environment variables, never committed
+- **Email Masking**: Logs mask email addresses for privacy
+- **CORS**: Configured for localhost (production needs domain whitelist)
+- **Input Validation**: Pydantic schemas enforce types and constraints
+- **Error Handling**: Stack traces only in logs, never exposed to users
+
 ## Quick Start
 
 ### Prerequisites
